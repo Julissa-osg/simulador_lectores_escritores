@@ -1,0 +1,966 @@
+================================================================================
+ SimOS LAB · DOCUMENTACIÓN COMPLETA DEL PROYECTO
+ Simulador visual y educativo del problema de Lectores y Escritores
+ Curso: Sistemas Operativos · 2026
+================================================================================
+
+ÍNDICE
+--------------------------------------------------------------------------------
+  1. Qué es el proyecto
+  2. Cómo explicarlo en 10 pasos (guion de exposición)
+  3. Cómo entenderlo: las 4 ideas clave
+  4. La aplicación por pantallas
+  5. Los escenarios A–G explicados
+  6. Arquitectura y flujo (cómo se conecta todo)
+  7. Documentación por archivo y por función
+      7.1 main.py
+      7.2 src/model.py   (los datos)
+      7.3 src/sync.py    (la sincronización)
+      7.4 src/engine.py  (el motor)
+      7.5 src/scenarios.py (los escenarios)
+      7.6 src/ui/theme.py (la identidad visual)
+      7.7 src/ui/app.py  (ventana y navegación)
+      7.8 src/ui/simulator_view.py (el simulador)
+      7.9 src/ui/comparison_view.py (comparación)
+      7.10 src/ui/study_view.py (modo de estudio)
+      7.11 tests/  (pruebas)
+  8. Cómo ejecutar todo y verificar que funciona
+  9. Errores comunes y sus causas
+ 10. Mini-glosario y trucos de memoria
+
+
+================================================================================
+ 1. QUÉ ES EL PROYECTO
+================================================================================
+
+SimOS Lab es un programa de escritorio que SIMULA, de forma visual y paso a
+paso, el clásico problema informático de "Lectores y Escritores":
+
+  - Varios "lectores" consultan un dato compartido (el catálogo de una
+    biblioteca). Pueden leer varios a la vez sin molestarse.
+  - Varios "escritores" modifican ese dato. Mientras uno escribe, NADIE más
+    debe tocar el dato (ni otros escritores ni lectores).
+
+El programa muestra qué pasa cuando NO se coordina el acceso (condición de
+carrera, inanición, interbloqueo) y cómo lo resuelven los mecanismos clásicos
+de sincronización (semáforos, monitores, políticas de cola justa).
+
+PUNTO CRÍTICO para explicarlo con honestidad:
+  es una SIMULACIÓN DETERMINISTA DE EVENTOS, NO hilos reales del sistema
+  operativo. No lanza procesos ni usa primitivas reales del SO. Modela los
+  estados de unos hilos "de juguete" (objetos SimThread) y los avanza uno a
+  uno. Esto se hace a propósito: como cada paso está controlado, las carreras
+  e interbloqueos se pueden REPRODUCIR siempre igual, lo que es ideal para
+  enseñar.
+
+Tecnologías: Python 3 + CustomTkinter (interfaz) + pytest (pruebas).
+No necesita Internet ni base de datos.
+
+
+================================================================================
+ 2. CÓMO EXPLICARLO EN 10 PASOS 
+================================================================================
+
+PASO 1. "Es un laboratorio visual para entender la concurrencia."
+  -> Abre la analogía: una biblioteca con un catálogo que muchos consultan
+     y algunos modifican.
+
+PASO 2. "Hay lectores y escritores."  Explica las dos reglas:
+  - lector + lector  = no hay conflicto (leer no cambia nada).
+  - escritor + quien sea = conflicto (escribir cambia el dato).
+
+PASO 3. "Si nadie se coordina, ocurre la CONDICIÓN DE CARRERA."
+  -> Ejecuta el Escenario A sin protección con "Un paso".
+  -> Señala cómo dos escritores leen 100, ambos escriben 101, y el resultado
+     final es 101 en lugar de 102: se perdió una actualización.
+  -> Remarca: NO depende de la velocidad, depende de la INTERCALACIÓN.
+
+PASO 4. "La solución es la EXCLUSIÓN MUTUA."
+  -> Cambia a la variante "Con sincronización": ahora llega a 102.
+  -> Explica el concepto "sección crítica": la zona leer-calcular-escribir
+     debe ser indivisible.
+
+PASO 5. "Los semáforos son una herramienta para conseguirlo."
+  -> Es un contador con dos operaciones atómicas: wait (P) y signal (V).
+  -> Si vale 0, el que hace wait se bloquea esperando su turno.
+
+PASO 6. "Los monitores son otra herramienta, más cómoda."
+  -> Agrupan el dato protegido + las variables de condición.
+  -> El candado lo garantiza el propio monitor; el programador solo declara
+     cuándo esperar y cuándo avisar.  (Escenario B: verás la MISMA evolución
+     con semáforo y con monitor.)
+
+PASO 7. "Con la política de prioridad a lectores, un escritor puede morir de
+         hambre (INANICIÓN)."
+  -> Escenario D: el escritor espera y espera mientras llegan lectores.
+  -> Las métricas del panel lo muestran: "mayor espera" crece.
+
+PASO 8. "La solución a la inanición es una COLA JUSTA (FIFO)."
+  -> Escenario D, variante "Cola justa": nadie adelanta a quien llegó antes.
+
+PASO 9. "Hay un problema peor que esperar: el INTERBLOQUEO."
+  -> Escenario F: dos hilos retienen un recurso y piden el que tiene el otro
+     -> espera circular -> nadie avanza.
+  -> El programa lo DETECTA dibujando el grafo de asignación y marcando la
+     flecha circular. La solución es un ORDEN GLOBAL: todos piden R1 primero.
+
+PASO 10. "La interfaz no decide nada: solo escucha al motor."
+  -> El motor es una biblioteca independiente (se puede probar sin abrir
+     ventanas). Esto garantiza honestidad y reproducibilidad.
+
+CIERRE: "El modo de estudio y la pantalla Comparar permiten repasar y
+comprobar las diferencias entre los cuatro enfoques en una tabla."
+
+
+================================================================================
+ 3. CÓMO ENTENDERLO: LAS 4 IDEAS CLAVE
+================================================================================
+
+IDEA 1 · UN PASO = UN EVENTO
+  La unidad mínima de avance es un evento: cada vez que el motor avanza,
+  ejecuta UNA micro-operación de UN hilo (leer, calcular, escribir, esperar,
+  bloquearse, terminarse...). Cada micro-operación produce un Event que queda
+  guardado en el registro. Esto permite estudiar la simulación con lupa.
+
+IDEA 2 · EL MOTOR NO SABE DIBUJAR; LA INTERFAZ NO SABE SIMULAR
+  - engine.py sabe de reglas, estados e invariantes. Devuelve un "snapshot" o
+    fotografía del estado (threads, recurso, colas, eventos...).
+  - la interfaz (ui/) solo dibuja esa fotografía y envía órdenes simples:
+    play, pause, step, reset. NUNCA decide quién entra al recurso.
+  Esta separación es la respuesta típica a la pregunta "¿cómo está separada la
+  interfaz del motor?".
+
+IDEA 3 · LA SINCRONIZACIÓN ES UN COMPONENTE INTERCAMBIABLE
+  Un escenario pide un "mecanismo" (ninguno / semáforo / monitor) y una
+  "política" (prioridad a lectores / justa). El motor construye el mecanismo
+  con la función create_sync() y, a partir de ahí, solo le hace preguntas:
+  "¿puedo entrar?" (request) y "libero el recurso" (release).
+  Por eso el mismo escenario puede verse con dos herramientas sin cambiar el
+  motor.
+
+IDEA 4 · DETERMINISMO
+  El planificador es round-robin FIFO sobre los hilos "Listos": los hilos se
+  turnan siempre en el mismo orden. Resultado: el mismo escenario da SIEMPRE
+  la misma secuencia de eventos. Las pruebas automáticas se apoyan en esto
+  (por ejemplo, la carrera SIEMPRE termina en 101).
+
+
+================================================================================
+ 4. LA APLICACIÓN POR PANTALLAS
+================================================================================
+
+La app abre una ventana con una barra lateral y cinco pantallas (NAV_ITEMS):
+
+  1) Inicio ............ bienvenida (dashboard) con el botón
+                         "Comenzar simulación", "Guía de uso" y
+                         "Modo de estudio".
+  2) Introducción ...... analogía de la biblioteca, 4 tarjetas educativas.
+  3) Simulador ......... la pantalla principal:
+                         - selector de Escenario (A–G)
+                         - selector de Variante/mecanismo
+                         - botones Iniciar, Pausar/Reanudar, Un paso, Reiniciar
+                         - selector de Velocidad (Lenta → Muy rápida)
+                         - checkbox "Mostrar explicaciones"
+                         - escena dibujada: tarjetas de hilos (izq.: lectores,
+                           der.: escritores), el Catálogo en el centro, la cola
+                           de espera, el grafo de interbloqueo (en F) y la
+                           línea de tiempo de la CPU
+                         - panel de Estado (mecanismo, política, evento,
+                           recurso, espera, contexto...)
+                         - panel "Puntos clave" (teaching del escenario)
+                         - panel inferior "¿Qué está pasando?" con Último paso,
+                           ¿Qué?, ¿Por qué?, ¿Solución?
+                         - Registro de eventos con filtros por hilo y por tipo
+  4) Comparar .......... mismo escenario con 4 enfoques (sin sincronización,
+                         semáforos, monitores, acceso justo) y tabla de 11
+                         métricas (contador, coherencia, bloqueos, espera,
+                         inanición, interbloqueo, cambios de contexto...)
+  5) Modo de estudio ... 10 preguntas de opción múltiple con explicación.
+
+
+================================================================================
+ 5. LOS ESCENARIOS A–G EXPLICADOS
+================================================================================
+
+Cada escenario tiene 1 o 2 VARIANTES (una "mala" que muestra el problema y
+otra "corregida") y un texto educativo triple: que_pasa / por_que / solucion.
+
+A · CONDICIÓN DE CARRERA          (claves: race_broken, race_fixed)
+  Dos escritores incrementan un contador que empieza en 100 (leer, sumar,
+  escribir). Sin protección ambos leen 100 y escriben 101 -> FINAL 101, se
+  pierde una actualización. Con semáforo -> 102. Invariante: updates_lost=0.
+
+B · EXCLUSIÓN MUTUA                (mutex_semaphore, mutex_monitor)
+  Dos escritores (2 escritas c/uno) y un lector -> valor esperado 104.
+  Demuestra que solo un escritor está dentro a la vez, primero con semáforo y
+  después con monitor (mismo resultado).
+
+C · LECTORES CONCURRENTES          (readers_first)
+  Tres lectores (3 lecturas) y un escritor -> 101. Los lectores COINCIDEN en
+  el tiempo; el escritor espera a que la sala se vacíe.
+
+D · INANICIÓN (starvation)         (starvation_broken, starvation_fair)
+  Un escritor pide acceso pero llegan lectores en cadena. Con política
+  "prioridad a lectores" el escritor no progresa (su "mayor espera" crece).
+  Con cola justa FIFO, entra pronto. NO es un interbloqueo: el sistema avanza,
+  solo ese hilo no.
+
+E · BLOQUEO                        (block_semaphore)
+  Un escritor largo ocupa el recurso; los lectores quedan BLOQUEADOS y
+  esperando. Se resuelve solo cuando el escritor libera. Diferencia clave:
+  bloqueado = esperando algo que PUEDE llegar; interbloqueado = esperando algo
+  que NO llegará sin intervención.
+
+F · INTERBLOQUEO (deadlock)        (deadlock_broken, deadlock_fixed)
+  A1 toma R1 (Impresora) y pide R2 (Escáner); A2 toma R2 y pide R1 -> espera
+  circular. El motor lo DETECTA (grafo de espera) y lo pinta. La variante fija
+  impone un orden global (siempre R1 antes de R2) y el problema desaparece.
+
+G · CAMBIO DE CONTEXTO             (context_round_robin)
+  La CPU salta entre L1, E1 y L2 (round-robin). La línea de tiempo muestra qué
+  hilo tenía la CPU. Punto docente: cambiar de contexto NO protege el dato;
+  hace falta sincronización aparte.
+
+
+================================================================================
+ 6. ARQUITECTURA Y FLUJO (CÓMO SE CONECTA TODO)
+================================================================================
+
+Estructura de archivos:
+
+  sim_lec_escri/
+   ├── main.py                     # entrada: arranca la interfaz
+   ├── requirements.txt            # dependencias (customtkinter)
+   ├── README.md                   # documento principal
+   ├── conftest.py                 # hace importable src en pytest
+   ├── src/
+   │   ├── model.py                # datos: hilos, eventos, recurso, registro
+   │   ├── sync.py                 # semáforo, monitor, políticas, create_sync
+   │   ├── engine.py               # motor + controlador de reproducción
+   │   ├── scenarios.py            # escenarios A–G y variantes
+   │   └── ui/
+   │       ├── theme.py            # colores y tipografías
+   │       ├── app.py              # MainWindow + Inicio + Introducción
+   │       ├── simulator_view.py   # SimulatorCanvas + SimulatorView
+   │       ├── comparison_view.py  # tabla de comparación
+   │       └── study_view.py       # preguntas de estudio
+   ├── tests/
+   │   ├── test_simulacion.py      # 17 pruebas de escenarios
+   │   └── test_motor.py           # 15 pruebas de motor y sincronización
+   └── docs/                       # manuales y guías en Markdown
+
+EL FLUJO (cómo se conecta):
+
+  1. main.py crea MainWindow (src/ui/app.py).
+  2. El usuario abre "Simulador". SimulatorView crea:
+         SimulationEngine(config)  <- config sale de src/scenarios.py
+         SimulationController(engine)
+  3. Cada vez que el temporizador dispara (after), el controlador llama a
+         controller.tick()  ->  engine.step()   (si está en marcha)
+  4. engine.step() ejecuta UNA micro-operación:
+        - Escoge el siguiente hilo Listo (round-robin).
+        - Lo marca Ejecutando y llama al manejador de su micro-operación
+          (por ejemplo _op_solicitar, _op_leer_dato...).
+        - Si la operación toca el recurso, el motor pregunta al mecanismo
+          de sincronización: sync.request(thread) o sync.release(thread).
+  5. Cada paso produce UN Event y lo guarda en el EventLog.
+  6. La vista llama a engine.snapshot() y redibuja el Canvas y los paneles.
+     La interfaz NUNCA toma decisiones de sincronización.
+
+Relación de imports (quién usa a quién):
+  - model.py  : nadie depende de otros módulos (base de datos).
+  - sync.py   : importa model (SimThread, ThreadKind).
+  - engine.py : importa model + sync.create_sync.
+  - scenarios.py: importa model + sync (para las constantes MECH*/POLICY*).
+  - ui/*      : importa engine, scenarios, sync, model y theme.
+  - No hay ciclos de importación (create_sync importa dentro de la función
+    cuando es necesario para evitarlos).
+
+
+================================================================================
+ 7. DOCUMENTACIÓN POR ARCHIVO Y POR FUNCIÓN
+================================================================================
+
+--------------------------------------------------------------------------------
+ 7.1 main.py
+--------------------------------------------------------------------------------
+  Punto de entrada. Solo hace una cosa:
+
+  - importa run desde src.ui.app y ejecuta  run()  -> abre la ventana.
+
+  Se ejecuta con:  .venv/bin/python main.py
+
+
+--------------------------------------------------------------------------------
+ 7.2 src/model.py — LOS DATOS ("qué hay" en la simulación)
+--------------------------------------------------------------------------------
+  NO contiene lógica de decisión. Solo define tipos y estructuras.
+
+  CLASE ThreadState (Enum):
+    Tipos: LISTO, EJECUTANDO, ESPERANDO, BLOQUEADO, TERMINADO.
+    Son los estados visibles de un hilo en el modelo educativo.
+
+  CLASE ThreadKind (Enum):
+    Tipos: LECTOR ("lector") y ESCRITOR ("escritor").
+
+  CONSTANTES DE MICRO-OPERACIONES (cadenas):
+    OP_SOLICITAR      hilo pide acceso al recurso compartido.
+    OP_LIBERAR        libera el acceso.
+    OP_LEER_DATO      copia el valor compartido a su memoria local.
+    OP_ESCRIBIR_DATO  vuelca su memoria local en el recurso.
+    OP_CALCULAR       opera sobre su memoria local (arg = cantidad a sumar).
+    OP_USAR           trabajo dentro de la sección crítica (arg = texto).
+    OP_ESPERAR        espera planificada fuera del recurso.
+    OP_ADQUIRIR       toma un recurso exclusivo (arg = id de recurso).
+    OP_SOLTAR         suelta un recurso exclusivo (arg = id de recurso).
+    OP_TERMINAR       fin del programa del hilo.
+
+  CLASE MicroOp (dataclass):
+    - op:   nombre de la operación (una constante de arriba).
+    - arg:  argumento opcional (delta, id de recurso, texto...).
+    - note: texto explicativo para la interfaz.
+
+  CLASE SimThread (dataclass) — un hilo "de juguete":
+    Campos: tid (id corto, p. ej. "L1"), kind, label (nombre legible),
+            program (lista de MicroOp), state, pc (índice de la siguiente
+            operación), local_value, waiting_since (evento en que empezó a
+            esperar), blocked_reason, holds (recursos exclusivos retenidos).
+    Propiedades:
+      - finished       -> True si está TERMINADO.
+      - current_op     -> la MicroOp siguiente (o None si terminó).
+    Métodos:
+      - advance()      -> pc += 1 (pasa a la siguiente operación).
+      - block(event_number, reason)      -> pasa a ESPERANDO, recuerda cuándo.
+      - hard_block(event_number, reason) -> pasa a BLOQUEADO (espera que no se
+                                             resolverá sola, p. ej. deadlock).
+      - wake()         -> vuelve a LISTO y limpia la espera.
+      - to_dict()      -> versión serializable para snapshot().
+
+  CLASE EventType (Enum): los ~25 tipos de evento, por ejemplo
+    SIM_INICIO, LECTOR_ENTRA, ESCRITOR_ENTRA, ESCRITOR_MODIFICA_DATO,
+    HILO_BLOQUEADO, HILO_DESBLOQUEADO, CAMBIO_DE_CONTEXTO,
+    RECURSO_ASIGNADO, INTERBLOQUEO_DETECTADO, INVARIANTE_VIOLADO, FIN...
+
+  CLASE Event (dataclass) — la unidad mínima de avance:
+    Campos: number (secuencial), type, thread (id implicado), prev_state /
+            post_state, resource, explanation (frase sencilla), reason
+            (motivo técnico), consequences (cambios secundarios del mismo
+            paso), event_time, context_switch_from.
+    Métodos:
+      - to_dict()  -> versión serializable.
+      - short()    -> la línea corta del registro:
+                      "Evento 07 — Escritor 1: explica..."
+    Regla: UN PASO = UN EVENTO. Los desbloqueos colaterales van en
+    "consequences" para no romper esa regla.
+
+  CLASE ChangeRecord (dataclass):
+    Un cambio registrado en el recurso: event_number, old_value, new_value, by.
+
+  CLASE SharedResource (dataclass) — el catálogo:
+    Campos: name, value, initial_value, history (lista de ChangeRecord),
+            expected_value.
+    Métodos:
+      - reset()                 -> vuelve al valor inicial y borra historial.
+      - read()                  -> devuelve el valor actual (no modifica).
+      - write(new_value, by, event_number) -> escribe y deja traza.
+    Propiedades:
+      - updates_lost  -> actualizaciones perdidas = max(0, esperado - actual).
+      - is_consistent -> True si el valor coincide con el esperado.
+    Esta clase es la que demuestra la carrera: si al final updates_lost > 0,
+    se perdió una actualización.
+
+  CLASE ExclusiveResource (dataclass) — recurso para el interbloqueo:
+    Campos: rid, name, owner (hilo que lo tiene), waiting (cola de espera).
+    Propiedad: free -> True si no tiene dueño.
+
+  CLASE EventLog — el registro cronológico:
+    Métodos:
+      - add(event) / clear() / __len__ / __iter__
+      - filter(thread, event_type, scenario) -> eventos filtrados.
+      - threads_seen() -> ids de hilos que han aparecido.
+      - as_text()      -> todo el registro como texto.
+      - to_list()      -> todo como lista de dicts.
+    Propiedad: last -> último evento (o None). events -> copia de la lista.
+
+
+--------------------------------------------------------------------------------
+ 7.3 src/sync.py — LA SINCRONIZACIÓN ("las reglas de quién entra")
+--------------------------------------------------------------------------------
+  Cuatro partes: reglas de admisión, semáforo, monitor y la fábrica.
+
+  CONSTANTES:
+    POLICY_READERS_FIRST = "readers_first"  (prioridad a lectores)
+    POLICY_FAIR          = "fair"           (cola FIFO justa)
+    MECH_NONE = "none" / MECH_SEMAPHORE = "semaphore" / MECH_MONITOR = "monitor"
+
+  CLASE GrantResult (dataclass):
+    Resultado de una solicitud: granted (bool), reason (por qué), y
+    also_granted (otros hilos que entraron en el mismo paso).
+
+  CLASE ReadersWritersSync(ABC) — reglas comunes a todos los mecanismos:
+    Campos: policy, active_readers (set), active_writers (set),
+            waiting (cola de espera: pares tid+kind).
+    Propiedades:
+      - active_writer -> el único escritor activo (o None).
+      - reader_count  / writer_count.
+    Métodos:
+      - is_active(tid)      -> ¿ese hilo está dentro del recurso?
+      - request(thread)     -> el hilo pide acceso. Devuelve GrantResult.
+        Internamente: encola al hilo, ejecuta la política (_dispatch) y
+        comprueba si entró y si entraron otros.
+      - release(thread)     -> el hilo termina. Devuelve la lista de hilos
+        recién desbloqueados (consequences).
+      - _dispatch()         -> ejecuta la política configurada.
+      - _dispatch_readers_first() -> política clásica: mientras no haya un
+        escritor activo, cada lector en espera entra aunque haya escritores
+        esperando (por eso puede haber inanición de escritores). Un escritor
+        entra solo si no hay NI lectores NI escritores activos.
+      - _dispatch_fair()    -> cola FIFO estricta: solo se atiende al primero;
+        un lector no adelanta a un escritor que llegó antes.
+      - _grant_reason / _block_reason -> textos para la interfaz.
+      - check_invariants()  -> devuelve los invariantes violados:
+        * no puede haber lectores Y escritores activos a la vez.
+        * como máximo UN escritor activo.
+        (En modo "sin sincronización" esto se relaja a propósito.)
+      - is_enforcing        -> True si el mecanismo aplica exclusión.
+      - can_read(tid) / can_write(tid) -> consultas de estado.
+      - snapshot()          -> dict para la interfaz (activos, cola, conteos).
+
+  CLASE NullSync(ReadersWritersSync) — "sin sincronización":
+    Sobrescribe request/release para que TODOS entren siempre y los invariantes
+    se relajen (check_invariants devuelve vacío). Sirve para demostrar la
+    condición de carrera. is_enforcing -> False.
+
+  CLASE Semaphore (dataclass) — semáforo contador educativo:
+    Campos: name, value, blocked (deque de hilos esperando), history.
+    Métodos:
+      - wait(tid)  -> intenta tomar el semáforo. True si lo obtuvo; si vale 0,
+        encola al hilo y devuelve False (queda bloqueado).
+      - signal()   -> libera: si hay alguien bloqueado, lo despierta
+        (HANDOFF: el permiso pasa directamente a ese hilo, el valor no se
+        incrementa); si no hay bloqueados, incrementa value. Devuelve el id
+        desbloqueado o None.
+      - reset(value) -> restaura contador y cola.
+    Es un modelo educativo: no usa la primitiva real, solo su comportamiento.
+
+  CLASE SemaphoreMechanism(ReadersWritersSync) — lectores/escritores con
+  semáforos. Reproducción clásica:
+    - "wrt"   protege la exclusión del escritor (valor 0 si hay escritor).
+    - "mutex" protege el contador read_count (en este modelo la actualización
+      se considera atómica; es una simplificación documentada).
+    Métodos propios:
+      - _sync_wrt_from_state() -> mantiene la representación de "wrt"
+        coherente con el estado real (activos y cola).
+      - request / release      -> además de aplicar las reglas, registran el
+        historial del semáforo (p. ej. "E1 toma wrt -> 0").
+      - snapshot()             -> añade los semáforos y read_count al snapshot.
+
+  CLASE Condition (dataclass) — variable de condición:
+    Campos: name, waiters (cola), history.
+    Métodos:
+      - wait(tid)   -> el hilo se suspende en esta condición.
+      - signal()    -> despierta al primero de la cola.
+      - notify_all() -> despierta a todos.
+    Regla de oro: tras despertar hay que VOLVER A COMPROBAR la condición en un
+    bucle while.
+
+  CLASE Monitor:
+    Campos: name, lock_owner (quién está "dentro"), conditions (dict).
+    Métodos:
+      - condition(name) -> obtiene (o crea) una variable de condición.
+      - enter(tid) / exit(tid) -> entra/sale del monitor (exclusión mutua
+        garantizada por el propio monitor).
+    Política de señalización: signal-and-continue (el que hace signal conserva
+    el monitor y el despertado se re-evalúa después).
+
+  CLASE MonitorMechanism(ReadersWritersSync) — lectores/escritores con monitor:
+    Usa dos condiciones: "pueden_leer" y "puede_escribir".
+    Métodos propios:
+      - _refresh_conditions() -> sincroniza las colas de las condiciones con
+        la cola de espera real.
+      - request()  -> entra al monitor; si no se cumple la condición, el hilo
+        queda suspendido en su variable y sale del monitor.
+      - release()  -> libera y hace signal sobre las condiciones.
+      - snapshot() -> añade el monitor al snapshot.
+
+  FUNCIÓN create_sync(mechanism, policy) -> ReadersWritersSync:
+    Fábrica. Devuelve: NullSync si "none", SemaphoreMechanism si "semaphore",
+    MonitorMechanism si "monitor". Es el ÚNICO punto donde el motor elige el
+    mecanismo.  (Importa dentro de la función para evitar ciclos de import.)
+
+
+--------------------------------------------------------------------------------
+ 7.4 src/engine.py — EL MOTOR ("la lógica que avanza cada paso")
+--------------------------------------------------------------------------------
+  Es independiente de la interfaz. Dos clases: SimulationEngine (la reglas) y
+  SimulationController (play/pausa/velocidad).
+
+  CLASE SimulationEngine:
+    Constructor: __init__(config) -> guarda el escenario y llama a reset().
+
+    Métodos de ciclo de vida:
+      - reset()          -> estado inicial del escenario: contadores a 0, nuevo
+        EventLog, recurso con valor inicial/esperado, sincronización creada con
+        create_sync(cfg.sync_mechanism, cfg.sync_policy), hilos creados por
+        cfg.threads_factory(), recursos exclusivos por resources_factory(),
+        ready_queue con todos los hilos, current=None, y emite el primer evento
+        SIM_INICIO.
+      - _initial_emit()  -> genera el evento SIM_INICIO ("Comienza el
+        escenario «...»").
+
+    El paso a paso:
+      - step() -> ejecuta EXACTAMENTE UNA micro-operación de un hilo y devuelve
+        el Event (None si ya acabó). Internamente: toma el primero de la cola
+        Lista (round-robin: reencola al anterior si sigue en Ejecutando), lo
+        marca Ejecutando, lo añade a la timeline, llama a _execute(), cuenta un
+        cambio de contexto si cambió el hilo de la CPU, mide las esperas de los
+        bloqueados, aplica los invariantes y guarda el evento en el log.
+      - run_until_end(max_steps=2000) -> avanza hasta terminar y devuelve la
+        lista de eventos. Muy útil en pruebas.
+      - _finish_simulation() -> pone finished=True y emite el evento FIN con la
+        razón (todos terminaron o hay hilos que no pueden continuar).
+      - _execute(thread, number) -> mira thead.current_op, busca su manejador
+        en _HANDLERS y lo invoca. Si la operación no se conoce, avisa.
+
+    Los MANEJADORES de micro-operación (el "qué pasa cuando un hilo hace X"):
+      - _op_solicitar   -> el hilo pide el recurso. Llama a sync.request().
+        Si granted: avanza, marca Ejecutando y emite LECTOR_ENTRA o
+        ESCRITOR_ENTRA. Si no: lo bloquea (thread.block) y emite HILO_BLOQUEADO.
+        Los "also_granted" (otros que entraban en el mismo paso) se despiertan
+        como consecuencias.
+      - _op_liberar     -> sync.release(). Despierta a los recién desbloqueados
+        y emite HILO_DESBLOQUEADO (el hilo que libera sigue Ejecutando).
+      - _op_leer_dato   -> resource.read(); copia a thread.local_value.
+        Emite LECTOR_LEE o ESCRITOR_LEE_DATO.
+      - _op_calcular    -> local_value += arg (delta). Emite ESCRITOR_CALCULA.
+      - _op_escribir_dato -> resource.write(local_value, label, nº). Si el valor
+        no es consistente, añade la advertencia. Emite ESCRITOR_MODIFICA_DATO.
+      - _op_usar        -> trabajo dentro de la sección crítica: lector emite
+        LECTOR_LEE ("consulta el catálogo"); escritor hace +1 y emite
+        ESCRITOR_MODIFICA_DATO.
+      - _op_esperar     -> trabajo fuera del recurso; emite HILO_TRABAJA.
+      - _op_adquirir    -> pide un recurso EXCLUSIVO (interbloqueo). Si está
+        libre, lo asigna (RECURSO_ASIGNADO). Si no, bloquea al hilo en la cola
+        del recurso y llama a _detect_cycle(); si hay ciclo, marca
+        deadlock_detected=True, bloquea a TODOS los del ciclo y emite
+        INTERBLOQUEO_DETECTADO. Si no hay ciclo, emite RECURSO_SOLICITADO.
+      - _op_soltar      -> libera el recurso exclusivo; si había hilos
+        esperando, se lo entrega al primero (traspaso, avanzando su pc para que
+        no vuelva a pedirlo) y lo despierta. Emite RECURSO_LIBERADO.
+      - _op_terminar    -> fin del hilo: libera el acceso al recurso compartido
+        si lo tenía, libera recursos exclusivos retenidos, pasa a TERMINADO y
+        emite LECTOR_TERMINA o ESCRITOR_TERMINA.
+      - _unknown_op     -> operación desconocida: la ignora (HILO_TRABAJA).
+
+    Utilidades:
+      - _HANDLERS       -> diccionario "operación -> manejador". Añadir una
+        operación nueva = añadir la constante en model, el método _op_* y su
+        entrada en _HANDLERS.
+      - _wake_thread(tid) -> despierta a un hilo Esperando/Bloqueado, lo
+        reencola y devuelve la frase de la consecuencia.
+      - _emit(...)      -> constructor central de Events (pone número,
+        event_time, etc.). Todos los _op_* pasan por aquí.
+      - _detect_cycle() -> construye el grafo hilo -> dueño del recurso que
+        espera (waits) y busca un ciclo recorriéndolo. Devuelve la lista de
+        hilos del ciclo ([] si no hay). Es cómo se detecta el deadlock: por
+        DEPENDENCIAS, no por tiempos, así un bloqueo normal no da falso
+        positivo.
+      - _enforce_invariants(event) -> llama a sync.check_invariants() y, si
+        hay problemas, los añade a warnings y a las consecuencias del evento.
+
+    Consulta de estado:
+      - snapshot() -> dict completo: escenario, finished, current,
+        context_switches, event_count, threads[], resource, sync (snapshot del
+        mecanismo), exclusive[], warnings, max_wait, timeline[].
+      - thread(tid) -> devuelve el SimThread con ese id.
+
+  CLASE SimulationController — envoltura de reproducción:
+    - SPEEDS = {"Lenta":1200, "Normal":700, "Rápida":350, "Muy rápida":120}
+      (milisegundos entre eventos).
+    - __init__(engine, speed_name).
+    - interval_ms  -> ms según la velocidad elegida.
+    - set_speed(name) -> cambia la velocidad.
+    - play() / pause() / toggle() -> controlan el flag running.
+    - reset()  -> pausa y reinicia el motor.
+    - step_once() -> pausa, ejecuta UN paso.
+    - tick()   -> si está en marcha y no ha terminado, ejecuta un paso y lo
+      devuelve; si no, devuelve None. La interfaz lo llama desde un after().
+
+
+--------------------------------------------------------------------------------
+ 7.5 src/scenarios.py — LOS ESCENARIOS
+--------------------------------------------------------------------------------
+  Define el catálogo completo que ve el usuario.
+
+  CLASE ScenarioConfig (dataclass) — plantilla de un escenario:
+    key, title, subtitle, description,
+    que_pasa (¿qué está pasando?), por_que (¿por qué?), solucion (¿solución?),
+    teaching (lista de frases "puntos clave"),
+    initial_value / expected_value (del recurso),
+    sync_mechanism / sync_policy, detected (clave del problema),
+    threads_factory (función que crea los hilos),
+    resources_factory (función que crea los recursos exclusivos; por defecto
+    devuelve lista vacía), protected (bool), needs_sync (bool).
+
+  CLASE ScenarioVariant (dataclass): key, label (texto del menú), config.
+  CLASE ScenarioGroup (dataclass): key, title, subtitle, icon, variants[ ].
+
+  CONSTRUCTORES DE HILOS (ayudantes):
+    - _thread(tid, kind, program) -> crea un SimThread con etiqueta legible
+      ("Lector 1", "Escritor 2").
+    - _reader(tid, reads) -> programa: SOLICITAR + "reads" veces USAR
+      ("consulta el catálogo") + TERMINAR.
+    - _writer(tid, writes) -> SOLICITAR + "writes" veces USAR ("actualiza el
+      catálogo") + TERMINAR.
+
+  FÁBRICAS DE CADA ESCENARIO (funciones _*_threads / _*_resources):
+    - race: _race_unprotected()  -> 2 escritores [LEER_DATO, CALCULAR(+1),
+      ESCRIBIR_DATO, TERMINAR] SIN solicitar (por eso no hay protección).
+      _race_protected()         -> igual pero con SOLICITAR...TERMINAR.
+    - mutex: _mutex_threads()   -> E1(2), E2(2), L1(1) -> esperado 104.
+    - readers: _readers_threads() -> L1(3), L2(3), L3(3), E1(1) -> 101.
+    - starvation: _starvation_threads() -> L1(5), E1(1), L2(3), L3(3), L4(3),
+      L5(3). Y _starvation_group() construye las dos variantes con la misma
+      factoría pero distinta política.
+    - block: _block_threads()   -> E1(3), L1(1), L2(1) -> 103.
+    - deadlock: _deadlock_threads() -> A1 toma R1->R2, A2 toma R2->R1.
+      _deadlock_fixed_threads() -> ambos toman R1 primero y luego R2.
+      _deadlock_resources()     -> [R1 "Impresora", R2 "Escáner"].
+    - context: _context_threads() -> L1(2), E1(1), L2(2) -> 101.
+
+  CONSTANTES DE GRUPOS (SCENARIO_GROUPS en orden):
+    RACE, MUTEX, READERS, STARVATION, BLOCK, DEADLOCK, CONTEXT.
+    Cada uno con sus variantes "rota/corregida".
+
+  FUNCIONES DE BÚSQUEDA:
+    - get_group(key)        -> el ScenarioGroup con esa clave.
+    - find_variant(key)     -> el ScenarioConfig de la variante (p. ej.
+      find_variant("race_broken")). Útil en pruebas y en la vista.
+    - default_config()      -> la primera variante del primer grupo (RACE
+      sin protección).
+
+
+--------------------------------------------------------------------------------
+ 7.6 src/ui/theme.py — LA IDENTIDAD VISUAL
+--------------------------------------------------------------------------------
+  Solo colores, tipografías y utilidades de estilo. No dibuja nada.
+
+  PALETA (constantes de color hex):
+    BG, PAPER, BEIGE, STONE, BLUE_LIGHT, BLUE_MED, BLUE_DARK,
+    CHARCOAL, CHARCOAL_DEEP, TEXT, TEXT_SEC,
+    SAGE (verde = correcto), AMBER (espera), RED (conflicto).
+  Diccionarios de estado:
+    STATE_COLORS  -> qué color según el estado (Listo/Ejecutando/Esperando/
+                     Bloqueado/Terminado).
+    STATE_TEXT_COLORS -> color del texto sobre ese color de tarjeta.
+
+  FUNCIONES:
+    - init_fonts()          -> detecta las mejores fuentes instaladas
+      (Georgia, DejaVu Sans, DejaVu Sans Mono con alternativas). Se llama una
+      sola vez.
+    - title_font(size, weight) -> tupla (familia, tamaño, peso) para títulos.
+    - ui_font(size, weight)    -> tupla para interfaz.
+    - mono_font(size, weight)  -> tupla monoespaciada para números/código.
+    - state_color(state)       -> color de un estado.
+    - state_text_color(state)  -> color de texto para ese estado.
+
+
+--------------------------------------------------------------------------------
+ 7.7 src/ui/app.py — VENTANA, NAVEGACIÓN E INICIO
+--------------------------------------------------------------------------------
+
+  FUNCIÓN draw_winter_scene(canvas, w, h):
+    Dibuja el paisaje invernal (luna, colinas, pinos y copos de nieve con
+    semilla fija para que sea estable). Es el fondo artístico de la bienvenida.
+
+  CLASE DashboardView(ctk.CTkFrame) — pantalla de Inicio:
+    Texto de bienvenida, tres tarjetas descriptivas (Lectores, Escritores,
+    Recurso compartido) y botones:
+      - "Comenzar simulación" -> app.show("simulador")
+      - "Guía de uso"         -> app.show("intro")
+      - "Modo de estudio"     -> app.show("estudio")
+    La ilustración vive en un tk.Canvas que se redibuja con _redraw() cuando
+    cambia de tamaño.
+
+  CLASE IntroView(ctk.CTkFrame) — ilustración educativa:
+    4 tarjetas en cuadrícula (Lector, Escritor, Recurso compartido, Lo que
+    puede fallar) usando la analogía de la biblioteca y un botón "Iniciar
+    simulación".
+
+  CONFIGURACIÓN DE NAVEGACIÓN:
+    NAV_ITEMS = [("inicio",...), ("intro",...), ("simulador",...),
+                 ("comparar",...), ("estudio",...)]   (5 pantallas)
+    VIEWS dict -> asocia cada nombre a su clase de vista.
+
+  CLASE MainWindow(ctk.CTk) — la ventana principal:
+    - __init__(): configura el tema claro, tamaño 1300x840, construye la barra
+      lateral (_build_sidebar), el área de contenido y muestra "inicio".
+    - _build_sidebar(): cabecera "SimOS Lab", los 5 botones de navegación con
+      su ícono y el pie "Sistemas Operativos · 2026".
+    - show(name): destruye la vista actual (si la hay), crea la nueva
+      (VIEWS[name](content, app)), la empaqueta y pinta de azul el botón activo.
+    - _on_close(): cierra limpiamente (llama a on_close() de la vista actual,
+      que cancela el temporizador de animación) y destruye la ventana.
+
+  FUNCIÓN run():
+    Crea MainWindow() y entra en el bucle de eventos (app.mainloop()).
+
+
+--------------------------------------------------------------------------------
+ 7.8 src/ui/simulator_view.py — EL SIMULADOR
+--------------------------------------------------------------------------------
+
+  FUNCIÓN round_rect(canvas, x1,y1,x2,y2, r=10, **kwargs):
+    Dibuja un rectángulo redondeado aproximado con un polígono suavizado.
+    Se usa para tarjetas (hilos, catálogo, recursos).
+
+  CLASE SimulatorCanvas(tk.Canvas) — pinta la escena:
+    - __init__: lienzo de fondo PAPER; guarda snapshot/config/mecanismo.
+    - update_scene(snapshot, config, mechanism, policy): guarda y redibuja.
+    - redraw(): borra todo; si no hay snapshot muestra el texto "Inicia la
+      simulación"; si hay recursos exclusivos dibuja el grafo de interbloqueo
+      (_draw_deadlock), si no la escena lectores/escritores
+      (_draw_readers_writers); siempre añade la línea de tiempo.
+    - _draw_readers_writers(w,h): distribuye lectores a la izquierda y
+      escritores a la derecha (tarjetas), dibuja el Catálogo centrado y la
+      cola de espera debajo. Flechas verdes conectan a los activos.
+    - _layout_column(...): reparte las tarjetas de una columna verticalmente.
+    - _draw_thread_card(x,y,w,h,t,waiting): tarjeta del hilo con el color de su
+      estado, el ícono (libro ▤ o lápiz ✎), etiqueta y estado; si es escritor
+      muestra su local_value.
+    - _draw_catalog(x1,y1,x2,y2,snap): el recurso. Borde rojo = sección
+      crítica ocupada; verde = lectura compartida; beige = disponible. Muestra
+      el valor (en rojo si no es consistente), el esperado y los conteos.
+    - _draw_waiting_queue(x,y,w,snap): la cola de espera ("L1 -> E2 -> ...").
+    - _draw_deadlock(w,h): grafo de asignación: tarjetas de hilos a la
+      izquierda, recursos a la derecha; flechas verdes = asignado a; flechas
+      rojas discontinuas = solicita. Si hay deadlock, mensaje rojo "╚
+      Interbloqueo: espera circular detectada".
+    - _draw_timeline(w,h): fila de celdas de color (azul claro lector/azul
+      oscuro escritor) que muestran qué hilo tuvo la CPU, limitada al ancho.
+
+  CLASE SimulatorView(ctk.CTkFrame) — controles + paneles + registro:
+    Constructor: crea el motor y el controlador con la primera variante del
+    primer grupo, construye todo (header/body/bottom), sincroniza variantes,
+    refresca y programa el bucle de animación (_schedule).
+
+    Construcción:
+      - _build_header(): título del escenario, dos menús (Escenario, Variante).
+      - _build_body(): Canvas a la izquierda; panel derecho con botones
+        (Iniciar, Un paso, Reiniciar, Pausar/Reanudar), Velocidad, checkbox
+        "Mostrar explicaciones", caja Estado y caja "Puntos clave".
+      - _build_bottom(): tarjeta "¿Qué está pasando?" a la izquierda y el
+        Registro de eventos con filtros (por hilo y por tipo) a la derecha.
+      - _button(...): helper para crear botones con consistencia visual.
+
+    Eventos de la interfaz:
+      - _on_group_change(title): cambia de escenario, actualiza la lista de
+        variantes y carga la primera.
+      - _sync_variant_options(): rellena el menú de variantes.
+      - _on_variant_change(label): carga la variante elegida.
+      - _load_config(config): crea NUEVO motor y controlador con ese escenario
+        (mantiene la velocidad), resetea filtros y refresca todo.
+      - _on_play / _on_pause / _on_step / _on_reset / _on_speed /
+        _on_toggle_explanations: traducen los clics a órdenes al controlador.
+        Los botones cambian de texto ("En marcha…", "Reanudar"...).
+
+    Bucle de animación:
+      - _schedule(): programa el próximo tick con self.after(interval_ms).
+      - _loop(): si está en marcha, tick() avanza un paso y refresca; al
+        terminar pausa automáticamente y vuelve a programarse.
+      - on_close(): cancela el temporizador (limpia el cierre de la ventana).
+
+    Refresco (toda la pantalla se lee de snapshot()):
+      - _refresh_all(): actualiza títulos, escena, estado, puntos clave,
+        explicaciones, registro y filtros. Es el método que se llama tras cada
+        avance.
+      - _refresh_status(snap): texto monoespaciado con mecanismo, política,
+        nº de evento, valor del recurso, consistencia, lectores/escritores
+        activos, esperando, cambios de contexto, interbloqueo y mayor espera.
+      - _refresh_teaching(): description + puntos clave del escenario.
+      - _refresh_explanations(): rellena el panel "¿Qué está pasando?" con
+        "Último paso: <evento>", "¿Qué está pasando?...", "¿Por qué?...",
+        "¿Solución?...". (Solo si el checkbox está marcado.)
+      - _last_event_text(): la línea corta del último evento del registro.
+      - _reset_filters(): pone los dos filtros en "Todos".
+      - _refresh_filters(snap): actualiza las opciones de los menús (hilos que
+        existen, tipos de evento que han ocurrido).
+      - _refresh_log(): vuelca a la caja de texto el registro filtrado (con las
+        consecuencias indentadas bajo cada evento) y hace scroll al final.
+
+
+--------------------------------------------------------------------------------
+ 7.9 src/ui/comparison_view.py — COMPARAR SOLUCIONES
+--------------------------------------------------------------------------------
+
+  CONSTANTES:
+    APPROACHES = 4 enfoques:
+      ("Sin sincronización",   none,       readers_first)
+      ("Semáforos",            semaphore,  readers_first)
+      ("Monitores",            monitor,    readers_first)
+      ("Acceso justo (FIFO)",  semaphore,  fair)
+    METRICS = 11 métricas que se muestran:
+      Resultado del contador, Valor esperado, Recurso consistente, Lectores
+      atendidos, Escritores atendidos, Eventos ejecutados, Bloqueos, Mayor
+      espera (eventos), Inanición detectada, Interbloqueo detectado, Cambios
+      de contexto.
+
+  FUNCIÓN run_metrics(config) -> dict:
+    Ejecuta el escenario hasta el final y mide/observa eventos:
+    - cuenta LECTOR_ENTRA y ESCRITOR_ENTRA (atendidos),
+    - cuenta HILO_BLOQUEADO y RECURSO_SOLICITADO (bloqueos),
+    - mayor espera = max de engine.max_wait,
+    - inanición = mayor espera >= 15,
+    - más value/expected/consistent, events, deadlock, context_switches.
+    Devuelve un dict con esas 11 claves.
+
+  CLASE ComparisonView(ctk.CTkFrame):
+    - __init__: título, menú de escenarios (excluye "deadlock", que no tiene
+      sentido comparar con 4 enfoques porque usa recursos exclusivos), botón
+      "Recalcular", la tabla y una nota aclaratoria. Llama a _compute().
+    - _on_change(title): cambia el escenario base y recalcula.
+    - _compute(): borra la tabla; para cada enfoque COPIA el escenario base con
+      dataclasses.replace(base, sync_mechanism=mech, sync_policy=policy) y
+      llama a run_metrics(); pinta la cabecera (4 columnas) y cada métrica,
+      coloreando en rojo lo inconsistente, en ámbar la inanición/esperas
+      altas, etc.
+
+
+--------------------------------------------------------------------------------
+ 7.10 src/ui/study_view.py — MODO DE ESTUDIO
+--------------------------------------------------------------------------------
+
+  CLASE Question (dataclass, frozen):
+    key, text (pregunta), options (3 respuestas), correct (índice de la
+    correcta), explanation (explicación completa), topic (tema).
+
+  CONSTANTE QUESTIONS: las 10 preguntas del modo de estudio.
+    q1 carrera, q2 bloqueo vs interbloqueo, q3 lectores simultáneos, q4
+    semáforo, q5 inanición, q6 cambio de contexto vs carrera, q7 monitor vs
+    semáforo, q8 variable de condición, q9 invariante lectores/escritores,
+    q10 cola FIFO justa.
+
+  CLASE StudyView(ctk.CTkFrame):
+    - __init__: título, barra con el marcador "Aciertos: X / Y (de 10)" y el
+      botón "Reiniciar respuestas"; luego un área desplazable con una tarjeta
+      por pregunta: texto, 3 botones de opción (A./B./C.) y una etiqueta de
+      retroalimentación.
+    - _answer(key, choice): la primera vez que se responde una pregunta:
+      bloquea los botones, pinta de VERDE la opción correcta y de ROJO la
+      elegida si era incorrecta, y muestra "✓ Correcto." o "✗ No exactamente."
+      seguido de la explicación completa. Actualiza el marcador.
+    - _update_score(): recalcula aciertos sobre respondidas.
+    - _restart(): borra las respuestas y restaura todos los botones.
+
+
+--------------------------------------------------------------------------------
+ 7.11 tests/ — PRUEBAS AUTOMATIZADAS (32 pruebas)
+--------------------------------------------------------------------------------
+  Se ejecutan con:  .venv/bin/python -m pytest -q   ->  32 passed.
+
+  tests/test_simulacion.py (17 pruebas) — escenarios:
+    - Carrera (4): final 101 sin protección; 102 con protección; reproducible
+      (5 veces -> 101); no se solapan dos escritores en la protegida.
+    - Lectores/escritores (5): lectores comparten; nunca lectores+escritor a
+      la vez; escritores mutuamente excluyentes; contador de lectores nunca
+      negativo; semáforo y monitor dan el mismo resultado (104).
+    - Interbloqueo (4): se detecta; aparece INTERBLOQUEO_DETECTADO en el
+      registro; el orden global lo previene; un bloqueo normal NO da falso
+      positivo.
+    - Inanición (3): la política injusta produce espera >= 15; la justa la
+      reduce; ambas dan valor 101 consistente.
+    - Catálogo (1): todos los grupos tienen variantes.
+
+  tests/test_motor.py (15 pruebas) — motor y sincronización:
+    - Motor (9): un paso = un evento; step() -> None al terminar; reset
+      restaura todo; pausa/reanudación; step_once pausa; reset del controlador
+      detiene; invariantes en los escenarios sincronizados; registro coherente;
+      la línea de tiempo registra cambios de contexto.
+    - Sincronización (6): wait/signal con handoff; el semáforo nunca negativo;
+      SemaphoreMechanism excluye escritores; MonitorMechanism usa condiciones;
+      NullSync permite conflictos (a propósito); la cola justa impide a un
+      lector adelantar a un escritor.
+
+
+================================================================================
+ 8. CÓMO EJECUTAR TODO Y VERIFICAR QUE FUNCIONA
+================================================================================
+
+  # 1) Entorno virtual (una sola vez)
+        python -m venv .venv
+        source .venv/bin/activate
+        pip install -r requirements.txt
+        pip install pytest
+
+  # 2) Arrancar la aplicación
+        .venv/bin/python main.py
+
+  # 3) Verificar que todo compila
+        .venv/bin/python -m compileall -q src main.py
+
+  # 4) Ejecutar las 32 pruebas automáticas
+        .venv/bin/python -m pytest -q
+
+  Resultado esperado: 32 passed. (en menos de un segundo).
+
+  # 5) (Opcional) revisar el tree del proyecto en runtime con el intérprete
+        .venv/bin/python
+        >>> from src.engine import SimulationEngine
+        >>> from src.scenarios import find_variant
+        >>> e = SimulationEngine(find_variant("race_broken"))
+        >>> e.run_until_end()
+        >>> e.resource.value, e.resource.is_consistent
+        (101, False)
+
+
+================================================================================
+ 9. ERRORES COMUNES Y SUS CAUSAS
+================================================================================
+
+  "ModuleNotFoundError: customtkinter"  -> no activaste el venv, o faltó
+     pip install -r requirements.txt.
+  "ModuleNotFoundError: tkinter"        -> falta Tk en el sistema:
+     sudo pacman -S tk  (Arch),  sudo apt install python3-tk  (Debian/Ubuntu).
+  "No module named 'src'"               -> ejecutas pytest/main desde otra
+     carpeta. Ejecuta desde la raíz del proyecto.
+  "pip install customtkinter dice que no encuentra nada" -> quizá usaste el
+     python del sistema (con permisos) en vez del venv. Nunca uses sudo pip.
+  La ventana no aparece (WSL/SSH)       -> no hay servidor gráfico; usa un
+     escritorio local o X11 forwarding.
+  Algo "muy rápido para ver"            -> usa la velocidad Lenta o "Un paso".
+
+
+================================================================================
+ 10. MINI-GLOSARIO Y TRUCOS DE MEMORIA
+================================================================================
+
+  CONCURRENCIA............ Que varios hilos "hacen cosas a la vez" sobre datos
+                          compartidos (en el modelo: se turnan en la CPU).
+  SECCIÓN CRÍTICA......... La zona del código que toca el dato compartido y no
+                          puede ejecutarse "por partes" entre hilos.
+  EXCLUSIÓN MUTUA......... A lo sumo UN hilo en la sección crítica.
+  SEMÁFORO................ Contador con wait(P)/signal(V). wait bloquea si 0.
+  MONITOR................. Dato protegido + variables de condición; el candado
+                          lo pone él (lock_owner).
+  VARIABLE DE CONDICIÓN... "Espera hasta que..."; al despertar, re-comprueba.
+  CONDICIÓN DE CARRERA.... Dos hilos pisan una operación no protegida
+                          (leer-calcular-escribir) -> se pierde una actualización.
+  INANICIÓN............... Un hilo espera PARA SIEMPRE porque otros siempre
+                          entran antes (no es un bloqueo mutuo).
+  INTERBLOQUEO............ Espera CIRCULAR: cada uno espera lo que retiene otro;
+                          sin intervención, nadie avanza.
+  BLOQUEADO vs BLOQUEADO.. Esperando = puede llegar la condición. Interbloqueado
+                          = el despertador nunca va a llegar.
+  CAMBIO DE CONTEXTO..... La CPU pasa de un hilo a otro; NO es sincronización.
+
+  Trucos de memoria:
+    - "Leer no muerde; escribir sí."  -> por eso los lectores se juntan y el
+      escritor exige soledad.
+    - "wait es Pedir, signal es Avisar" (P/V).
+    - "Inanición = el sistema avanza; Interbloqueo = el sistema se congela."
+    - "El semáforo es bruto y poderoso; el monitor es formal y seguro."
+    - "La interfaz obedece al motor, nunca decide quién entra."
+
+================================================================================
+ FIN DE LA DOCUMENTACIÓN
+================================================================================
